@@ -12,10 +12,17 @@ crosssection = data[sys.argv[1].split("/")[-1]]
 
 
 ifile = ROOT.TFile.Open(sys.argv[1],"READ")
-print(ifile.Get("normalization").GetBinContent(1))
-N_events = ifile.Get("normalization").GetBinContent(1)
-normalizedWeight = crosssection/N_events
-weight="%.8f"%normalizedWeight
+
+
+if "signal" in sys.argv[1]:
+    dummy = 1.0
+    weight= "%.8f"%dummy
+else:
+    N_events = ifile.Get("normalization").GetBinContent(1)
+    normalizedWeight = crosssection/N_events
+    print(ifile.Get("normalization").GetBinContent(1))
+    weight="%.8f"%normalizedWeight
+ 
 print(weight)
 print(crosssection)
 
