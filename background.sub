@@ -1,0 +1,15 @@
+executable = background.sh
+arguments = $(file) 
+
+transfer_input_files = ../cmssw.tar.gz
+transfer_output_files = ""
+
+requirements = (TARGET.ProvidesCPU == True)  && (TARGET.ProvidesEKPResources == True)
+request_disk = 10000000
+accounting_group = cms.jet
+
+log = log/$(file).log
+output = stdout/$(file).out
+error = err/$(file).err
+
+queue file from file_list.txt
