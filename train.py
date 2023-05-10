@@ -7,19 +7,12 @@ import mplhep as hep
 plt.style.use(hep.style.CMS)
 
 import random
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
 
 import os
 import subprocess
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-import h5py
-import awkward as ak
-import pickle
 import pandas as pd
 from scipy.spatial import distance_matrix
 
@@ -45,8 +38,6 @@ for f in glob.glob("/ceph/mgais/svj/finalv2/QCD*.root"):
     ),axis=0)
     b_weights = np.append(b_weights, np.expand_dims(np.array(b_tree["evtweight"].array()[b_filter_mask][b_pt_mask][b_nconst_mask]),axis=1),axis=0)
     print(f)
-   # print(np.isnan(b_fatjet_inputs).any())
-   # print(np.count_nonzero(np.isnan(b_fatjet_inputs)))
     
 
 s_tree = uproot.open("/ceph/mgais/svj/final/signal.root")['Events']
@@ -66,25 +57,6 @@ s_fatjet_inputs =  np.concatenate(
 )
 s_weights = np.append(s_weights, np.expand_dims(np.array(s_tree["evtweight"].array()[s_filter_mask][s_pt_mask][s_nconst_mask]),axis=1),axis=0)
 
-
-#print("signal:")
-#print(np.isnan(s_fatjet_inputs).any())
-#print(np.count_nonzero(np.isnan(s_fatjet_inputs)))
-
-#print(s_fatjet_inputs)
-#print(b_fatjet_inputs)
-#print(b_weights)
-#print(s_weights)
-
-#print(s_filter_mask.shape)
-#print(type(s_fatjet_inputs))
-#print(s_fatjet_inputs.shape)
-
-#print(b_filter_mask.shape)
-#print(type(b_fatjet_inputs))
-#print(b_fatjet_inputs.shape)
-
-#print(b_weights.shape)
 
 sum_b_weights=np.sum(b_weights)
 n_s=np.sum(s_weights)
@@ -106,9 +78,8 @@ X = X[idx]                                                       #randomize orde
 y = y[idx]
 weights = weights[idx]
 print(X.shape)
-print(weights.shape)
 print(y.shape)
-
+print(weights.shape)
 
 
 #print("NaN values in final data and truth set:")
@@ -116,7 +87,6 @@ print(y.shape)
 #print(np.isnan(y).any())
 
 #Split up data into training and test data sets
-X_train_np, X_test_np, y_train_np, y_test_np = train_test_split(X, y, test_size=0.30, random_state=33)
 X_train_np, X_test_np = np.split(X, [int(len(X)*0.7)])
 y_train_np, y_test_np = np.split(y, [int(len(y)*0.7)])
 weights_train_np, weights_test_np = np.split(weights, [int(len(weights)*0.7)])
@@ -145,16 +115,10 @@ model = nn.Sequential(nn.Linear(X.shape[1], 25),
                       nn.Linear(5, 1),
                       nn.Sigmoid())
 
-print("XXXX")
-print(weights_train.shape)
-print(torch.flatten(weights_train).shape)
+
 def weighted_loss(y,y_hat,w):
-    #loss_function = nn.BCEWithLogitsLoss(weight=torch.flatten(weights_train).unsqueeze(1))
     loss_function = nn.BCEWithLogitsLoss(reduction='none')
     return (loss_function(y, y_hat)*w).mean()
-
-#loss_function = nn.BCELoss()
-#loss_function = nn.MSELoss()
 
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
@@ -163,22 +127,9 @@ def train():
     model.train()
     pred_y = model(X_train)
     #print(pred_y)
-
-    #print("XXXXXX")
-    #print(pred_y.shape)
-    #print(torch.flatten(pred_y).shape)
-    #print(y_train.shape)
-
-    
-    #loss = loss_function(torch.flatten(pred_y), y_train)
-
-    print(torch.flatten(pred_y).shape)
-    print(weights_train.shape)
-    print(y_train.shape)
     
     loss = weighted_loss(torch.flatten(pred_y), y_train, torch.flatten(weights_train))
-
-
+    
     #losses.append(loss.item())
     
     #print(loss.item())                                                                                                                                                                                   
@@ -272,8 +223,8 @@ print(df)
 
 final_y_s = pred_y[y_test==1].numpy()
 final_y_b = pred_y[y_test==0].numpy()
-final_w_s = weights_test[y_test==1].flatten()
-final_w_b = weights_test[y_test==0].flatten()
+final_w_s = weights_test[y_test==1].numpy()
+final_w_b = weights_test[y_test==0].numpy()
 
 
 
