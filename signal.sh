@@ -20,7 +20,7 @@ cd ../../
 
 cp CMSSW_10_6_26/src/PhysicsTools/SUEPScouting/test/ScoutingNanoAOD_cfg.py .
 
-cmsRun ScoutingNanoAOD_cfg.py inputFiles=file:$1.root outputFile=scouting_$1.root maxEvents=1000 isMC=true era=2018
+cmsRun ScoutingNanoAOD_cfg.py inputFiles=file:$1.root outputFile=scouting_$1.root maxEvents=-1 isMC=true era=2018
 
-cp scouting_$1_numEvent1000.root /work/mgais/svj/signal/outfiles/
+cp scouting_$1.root /ceph/mgais/svj/signalv2/outfiles/
 

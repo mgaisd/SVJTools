@@ -5,9 +5,10 @@ transfer_input_files = ../cmssw.tar.gz
 transfer_output_files = ""
 
 requirements = (TARGET.ProvidesCPU == True)  && (TARGET.ProvidesEKPResources == True)
+accounting_group = cms.jet
 
 log = log/$(file).log
-output = out/$(file).out
+output = stdout/$(file).out
 error = err/$(file).err
 
 queue file from file_list.txt

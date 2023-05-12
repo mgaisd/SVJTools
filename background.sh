@@ -30,5 +30,5 @@ cd ../../
 
 python3 add_normalization.py output_$1.root $1.root
 
-cp output_$1.root /ceph/mgais/svj/background/outfiles_full/
+cp output_$1.root /ceph/mgais/svj/backgroundv2/outfiles/
 
