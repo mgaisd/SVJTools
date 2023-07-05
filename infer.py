@@ -53,7 +53,7 @@ class SVJV1(Dataset):
 
     url = '/dummy/'
 
-    def __init__(self, root, max_events=1e8, datatype='offline'):
+    def __init__(self, root, max_events=1e8, datatype='scouting'):
         super(SVJV1, self).__init__(root)
         self.processed_events = 0
         self.max_events = max_events
@@ -94,9 +94,9 @@ class SVJV1(Dataset):
         edge_index = torch.empty((2,0), dtype=torch.long)
         with h5py.File(self.raw_paths[file_idx]) as f:
             Npfc = (f['features'][idx_in_file][:,0] != 0).sum()
-            x_pfc = f['features'][idx_in_file,:Npfc,:]
-            x_pfc = torch.from_numpy(x_pfc)
-            x = x_pfc
+            feats = f['features'][idx_in_file,:Npfc,:]
+            x_pfc = torch.from_numpy(feats).float()
+            x = torch.from_numpy(feats).float()
             y = np.array(f['target'][idx_in_file],dtype='f')
             y = torch.from_numpy(y)
         
@@ -145,6 +145,7 @@ class SVJNet(nn.Module):
             nn.Linear(32, 8),
             nn.ELU(),
             nn.Linear(8, 1)
+            #nn.ELU()
         )
         
     def forward(self,
@@ -176,7 +177,7 @@ print('Loading test dataset at', testpath)
 max_events_train = 1000000 #100000
 max_events_val = int(max_events_train*0.5)
 
-data_test = SVJV1(testpath,max_events=max_events_train,datatype='offline')
+data_test = SVJV1(testpath,max_events=max_events_train,datatype='scouting')
 
 test_loader = DataLoader(data_test, batch_size=batchsize,shuffle=True,
                           follow_batch=['x_pf'])

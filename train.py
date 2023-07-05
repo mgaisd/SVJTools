@@ -148,8 +148,8 @@ class SVJNet(nn.Module):
             nn.ELU(),
             nn.Linear(32, 8),
             nn.ELU(),
-            nn.Linear(8, 1),
-            nn.ELU()
+            nn.Linear(8, 1)
+            #nn.ELU()
         )
         
     def forward(self,
@@ -255,7 +255,7 @@ all_train_loss = []
 all_val_loss = []
 loss_dict = {'train_loss': [], 'val_loss': []}
 
-for epoch in range(1, 100):
+for epoch in range(1, 65):
     print(f'Training Epoch {epoch} on {len(train_loader.dataset)} jets')
     loss = train()
     scheduler.step()
