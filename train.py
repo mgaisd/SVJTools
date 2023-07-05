@@ -1,240 +1,287 @@
+import sys
+import numpy as np
+import subprocess
+import tqdm
+import pandas as pd
+import os
+import os.path as osp
+import glob
+import h5py
 import uproot
 import torch
-import numpy as np
-import glob
-import matplotlib.pyplot as plt
-import mplhep as hep
-plt.style.use(hep.style.CMS)
-
+import awkward as ak
 import random
 
-import os
-import subprocess
 from torch import nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-import pandas as pd
-from scipy.spatial import distance_matrix
+from torch.nn import Sequential, Linear
+import torch.nn.functional as F
+from torch_geometric.data import Data
+from torch_geometric.data import Dataset
+from torch_geometric.data import DataLoader
+from torch_geometric.nn.conv import DynamicEdgeConv
+from torch_geometric.nn.pool import avg_pool_x
+from torch_geometric.nn.norm import BatchNorm
+from torch_scatter import scatter
+
+def global_add_pool(x, batch, size=None):
+    """
+    Globally pool node embeddings into graph embeddings, via elementwise sum.
+    Pooling function takes in node embedding [num_nodes x emb_dim] and
+    batch (indices) and outputs graph embedding [num_graphs x emb_dim].
+
+    Args:
+        x (torch.tensor): Input node embeddings
+        batch (torch.tensor): Batch tensor that indicates which node
+        belongs to which graph
+        size (optional): Total number of graphs. Can be auto-inferred.
+
+    Returns: Pooled graph embeddings
+
+    """
+    size = batch.max().item() + 1 if size is None else size
+    return scatter(x, batch, dim=0, dim_size=size, reduce='add')
 
 
 
-b_fatjet_inputs = np.empty([0,5])
-b_weights = np.empty([0,1])
-s_weights = np.empty([0,1])
+class SVJV1(Dataset):
+    '''                                                                                                                               
 
-for f in glob.glob("/ceph/mgais/svj/finalv2/QCD*.root"):
-    b_tree = uproot.open(f)['Events']
-    b_filter_mask = np.array((b_tree["n_fatjet"].array()[:] > 0))
-    b_pt = b_tree["FatJet_pt"].array()[b_filter_mask]
-    b_pt_mask = (b_pt[:,0]>150)
-    b_nconst_mask = (b_tree["FatJet_nconst"].array()[b_filter_mask][b_pt_mask][:,0] > 2)    
-    b_fatjet_inputs=np.append(b_fatjet_inputs, np.concatenate(
-        (np.expand_dims(np.array(b_tree["FatJet_pt"].array()[b_filter_mask][b_pt_mask][b_nconst_mask][:,0]),axis=1),
-         np.expand_dims(np.array(b_tree["FatJet_eta"].array()[b_filter_mask][b_pt_mask][b_nconst_mask][:,0]),axis=1),
-         np.expand_dims(np.array(b_tree["FatJet_tau21"].array()[b_filter_mask][b_pt_mask][b_nconst_mask][:,0]),axis=1),
-         np.expand_dims(np.array(b_tree["FatJet_tau32"].array()[b_filter_mask][b_pt_mask][b_nconst_mask][:,0]),axis=1),
-         np.expand_dims(np.array(b_tree["FatJet_msoftdrop"].array()[b_filter_mask][b_pt_mask][b_nconst_mask][:,0]),axis=1)),
-        axis=-1
-    ),axis=0)
-    b_weights = np.append(b_weights, np.expand_dims(np.array(b_tree["evtweight"].array()[b_filter_mask][b_pt_mask][b_nconst_mask]),axis=1),axis=0)
-    print(f)
+        input: particle (candidates)
+
+    '''
+
+    url = '/dummy/'
+
+    def __init__(self, root, max_events=1e8, datatype='scouting'):
+        super(SVJV1, self).__init__(root)
+        self.processed_events = 0
+        self.max_events = max_events
+        self.strides = [0]
+        self.calculate_offsets()
+
+    def calculate_offsets(self):
+        for path in self.raw_paths:
+            with h5py.File(path, 'r') as f:
+                self.strides.append(len(f['features'][()]))
+
+        self.strides = np.cumsum(self.strides)
+        
+    def download(self):
+        raise RuntimeError(
+            'Dataset not found. Please download it from {} and move all '
+            '*.z files to {}'.format(self.url, self.raw_dir))
+
+    def len(self):
+        return self.strides[-1]
+
+    @property
+    def raw_file_names(self):
+        raw_files = sorted(glob.glob(osp.join(self.raw_dir, '*.h5')))
+        return raw_files
+
+    @property
+    def processed_file_names(self):
+        return []
+
+
+    def get(self, idx):
+        file_idx = np.searchsorted(self.strides, idx) - 1
+        #print(file_idx)
+        idx_in_file = idx - self.strides[max(0, file_idx)] - 1
+        if file_idx >= self.strides.size:
+            raise Exception(f'{idx} is beyond the end of the event list {self.strides[-1]}')
+        edge_index = torch.empty((2,0), dtype=torch.long)
+        with h5py.File(self.raw_paths[file_idx]) as f:
+            Npfc = (f['features'][idx_in_file][:,0] != 0).sum()
+            feats = f['features'][idx_in_file,:Npfc,:]
+            x_pfc = torch.from_numpy(feats).float()
+            x = torch.from_numpy(feats).float()
+            y = np.array(f['target'][idx_in_file],dtype='f')
+            y = torch.from_numpy(y)
+        
+        self.processed_events += 1
+        #if self.processed_events >= self.max_events:
+        #    return
+
+
+        #print("New jet")
+        #print(x_pfc)
+        #print(y)
+        
+        return Data(x=x, edge_index=edge_index, y=y, x_pf=x_pfc)
+
+        
+class SVJNet(nn.Module):
+    def __init__(self):
+        super(SVJNet, self).__init__()
+        
+        hidden_dim = 64
+        
+        self.pf_encode = nn.Sequential(
+            nn.Linear(4, hidden_dim),
+            nn.ELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ELU()
+        )
+
+        self.conv1 = DynamicEdgeConv(
+            nn=nn.Sequential(nn.Linear(2*hidden_dim, hidden_dim), nn.ELU()),
+            k=24
+        )
+        
+        self.conv2 = DynamicEdgeConv(
+            nn=nn.Sequential(nn.Linear(2*hidden_dim, hidden_dim), nn.ELU()),
+            k=24
+        )
+
+        self.conv3 = DynamicEdgeConv(
+            nn=nn.Sequential(nn.Linear(2*hidden_dim, hidden_dim), nn.ELU()),
+            k=24
+        )
+
+        self.output = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ELU(),
+            nn.Linear(64, 32),
+            nn.ELU(),
+            nn.Linear(32, 32),
+            nn.ELU(),
+            nn.Linear(32, 8),
+            nn.ELU(),
+            nn.Linear(8, 1),
+            nn.ELU()
+        )
+        
+    def forward(self,
+                x_pf,
+                batch_pf):
+        #print(x_ts)
+        #x_pf = BatchNorm(x_pf)
+        
+        x_pf_enc = self.pf_encode(x_pf)
+        
+        feats1 = self.conv1(x=(x_pf_enc, x_pf_enc), batch=(batch_pf, batch_pf))
+        feats2 = self.conv2(x=(feats1, feats1), batch=(batch_pf, batch_pf))
+        feats3 = self.conv3(x=(feats2, feats2), batch=(batch_pf, batch_pf))
+
+        #out, batch = avg_pool_x(batch_pf, feats3, batch_pf)
+        #out = self.output(out)
+
+        batch = batch_pf
+        out  = global_add_pool(feats3, batch_pf)
+        out = self.output(out)
+        
+        return out, batch
     
+batchsize = 300
 
-s_tree = uproot.open("/ceph/mgais/svj/final/signal.root")['Events']
-#print(s_tree.keys())
+trainpath = sys.argv[1]
+valpath = trainpath.replace("train/", "val/")
+mpath = sys.argv[2]
 
-s_filter_mask = np.array((s_tree["n_fatjet"].array()[:] > 0))# & (s_tree["FatJet_pt"].array()[:,0] > 150))
-s_pt = s_tree["FatJet_pt"].array()[s_filter_mask]
-s_pt_mask = (s_pt[:,0]>150)
-s_nconst_mask = (s_tree["FatJet_nconst"].array()[s_filter_mask][s_pt_mask][:,0] > 2)
-s_fatjet_inputs =  np.concatenate(
-    (np.expand_dims(np.array(s_tree["FatJet_pt"].array()[s_filter_mask][s_pt_mask][s_nconst_mask][:,0]),axis=1),
-     np.expand_dims(np.array(s_tree["FatJet_eta"].array()[s_filter_mask][s_pt_mask][s_nconst_mask][:,0]),axis=1),
-     np.expand_dims(np.array(s_tree["FatJet_tau21"].array()[s_filter_mask][s_pt_mask][s_nconst_mask][:,0]),axis=1),
-     np.expand_dims(np.array(s_tree["FatJet_tau32"].array()[s_filter_mask][s_pt_mask][s_nconst_mask][:,0]),axis=1),
-     np.expand_dims(np.array(s_tree["FatJet_msoftdrop"].array()[s_filter_mask][s_pt_mask][s_nconst_mask][:,0]),axis=1)),
-    axis=-1
-)
-s_weights = np.append(s_weights, np.expand_dims(np.array(s_tree["evtweight"].array()[s_filter_mask][s_pt_mask][s_nconst_mask]),axis=1),axis=0)
+print('Loading train dataset at', trainpath)
+print('Loading val dataset at', valpath)
 
+max_events_train = 1000000 #100000
+max_events_val = int(max_events_train*0.5)
 
-sum_b_weights=np.sum(b_weights)
-n_s=np.sum(s_weights)
+data_train = SVJV1(trainpath,max_events=max_events_train,datatype='scouting')
+data_val = SVJV1(valpath,max_events=max_events_val,datatype='scouting')
 
-s_weights[s_weights == 1] = sum_b_weights/n_s
-#print(np.sum(b_weights))
-#print(np.sum(s_weights))
+train_loader = DataLoader(data_train, batch_size=batchsize,shuffle=True,
+                          follow_batch=['x_pf'])
+val_loader = DataLoader(data_val, batch_size=batchsize,shuffle=True,
+                         follow_batch=['x_pf'])
 
-y_s = np.ones_like(s_fatjet_inputs[:,0])   
-y_b = np.zeros_like(b_fatjet_inputs[:,0])
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = 'cpu'
+print(device)
 
-X = np.concatenate((s_fatjet_inputs, b_fatjet_inputs))           #combine signal and background
-y = np.concatenate((y_s, y_b))
-weights = np.concatenate((s_weights, b_weights))
-idx = [i for i in range(len(X))]
+network = SVJNet().to(device)
 
-random.shuffle(idx)
-X = X[idx]                                                       #randomize order
-y = y[idx]
-weights = weights[idx]
-print(X.shape)
-print(y.shape)
-print(weights.shape)
-
-
-#print("NaN values in final data and truth set:")
-#print(np.isnan(X).any())
-#print(np.isnan(y).any())
-
-#Split up data into training and test data sets
-X_train_np, X_test_np = np.split(X, [int(len(X)*0.7)])
-y_train_np, y_test_np = np.split(y, [int(len(y)*0.7)])
-weights_train_np, weights_test_np = np.split(weights, [int(len(weights)*0.7)])
-
-
-
-#torch expects tensor as input
-X_train = torch.from_numpy(X_train_np).float()
-X_test = torch.from_numpy(X_test_np).float()
-y_train = torch.from_numpy(y_train_np).float()
-y_test = torch.from_numpy(y_test_np).float()
-weights_train = torch.from_numpy(weights_train_np).float()
-weights_test = torch.from_numpy(weights_test_np).float()
-
-#--------------------------------------------------------------------------------
-#training
-device = "cuda" if torch.cuda.is_available() else "cpu"
-devide = 'cpu'
-print(f"Using {device} device")
-
-
-model = nn.Sequential(nn.Linear(X.shape[1], 25),
-                      nn.ReLU(),
-                      nn.Linear(25, 5),
-                      nn.ReLU(),
-                      nn.Linear(5, 1),
-                      nn.Sigmoid())
-
-
-def weighted_loss(y,y_hat,w):
-    loss_function = nn.BCEWithLogitsLoss(reduction='none')
-    return (loss_function(y, y_hat)*w).mean()
-
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
+optimizer = torch.optim.Adam(network.parameters(), lr=0.001)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
 def train():
-    model.train()
-    pred_y = model(X_train)
-    #print(pred_y)
-    
-    loss = weighted_loss(torch.flatten(pred_y), y_train, torch.flatten(weights_train))
-    
-    #losses.append(loss.item())
-    
-    #print(loss.item())                                                                                                                                                                                   
-
-    model.zero_grad()
-    loss.backward()
-
-    optimizer.step()
-
-    return loss.item()
-
-@torch.no_grad()
-def test():
-    model.eval()
-    with torch.no_grad():
-        pred_y = model(X_test)
-        #loss = loss_function(torch.flatten(pred_y), y_test)
-        loss = weighted_loss(torch.flatten(pred_y), y_test, torch.flatten(weights_test))
-        return loss.item(), torch.flatten(pred_y), y_test
-
-@torch.no_grad()
-def val(X_test):
-    model.eval()
-    with torch.no_grad():
-        pred_y = model(X_test)
-        return pred_y
-
-
-def early_stopping(train_loss, validation_loss, min_delta, tolerance):
-
+    network.train()
     counter = 0
-    if (validation_loss - train_loss) > min_delta:
-        counter +=1
-        if counter >= tolerance:
-          return True
 
-#modify from here
-                      
-best_val_loss = 1e9
+    total_loss = 0
+    for data in tqdm.tqdm(train_loader):
+        counter += 1
 
-loss_dict = {'train':[],'val':[]}
+        data = data.to(device)
+        optimizer.zero_grad()
+        out = network(data.x_pf,
+                    data.x_pf_batch)
 
-last_ten = []
+        #print(data.x_pf_batch)
+        #print(np.bincount(data.x_pf_batch.cpu().detach().numpy()))
+        #print(data.x_pf[0])
+        #print(data.x_pf[1])
+        loss = nn.BCEWithLogitsLoss(reduction='sum')(out[0].view(-1),data.y.float())
+        #print(torch.sigmoid(out[0].view(-1)))
+        #print(data.y.float())
+        loss.backward()
+        total_loss += loss.item()
+        optimizer.step()
+        if counter*batchsize > max_events_train:
+            break
+        
+    return total_loss / len(train_loader.dataset)
 
-for epoch in range(3000):
-    train_loss = train()
+@torch.no_grad()
+def validate():
+    network.eval()
+    total_loss = 0
+    counter = 0
+    for data in tqdm.tqdm(val_loader):
+        counter += 1
+        #print(str(counter*BATCHSIZE)+' / '+str(len(train_loader.dataset)),end='\r')                                                                                                           
+        data = data.to(device)
+        with torch.no_grad():
+            out = network(data.x_pf,
+                       data.x_pf_batch)
+ 
+            loss = nn.BCEWithLogitsLoss(reduction='sum')(out[0].view(-1),data.y.float())
 
-    val_loss, pred_y, y_test = test()
+            total_loss += loss.item()
+            if  counter*batchsize > max_events_train:
+                break
+    return total_loss / len(val_loader.dataset)
+
+best_val_loss = 1e11
+all_train_loss = []
+all_val_loss = []
+loss_dict = {'train_loss': [], 'val_loss': []}
+
+for epoch in range(1, 100):
+    print(f'Training Epoch {epoch} on {len(train_loader.dataset)} jets')
+    loss = train()
+    scheduler.step()
+
+    print(f'Validating Epoch {epoch} on {len(val_loader.dataset)} jets')
+    loss_val = validate()
 
     print('Epoch {:03d}, Loss: {:.8f}, ValLoss: {:.8f}'.format(
-    epoch, train_loss, val_loss))
+        epoch, loss, loss_val))
 
-    loss_dict['train'].append(train_loss)
-    loss_dict['val'].append(val_loss)
+    all_train_loss.append(loss)
+    all_val_loss.append(loss_val)
+    loss_dict['train_loss'].append(loss)
+    loss_dict['val_loss'].append(loss_val)
+    df = pd.DataFrame.from_dict(loss_dict)
 
+    if not os.path.exists(mpath):
+        subprocess.call("mkdir -p %s"%mpath,shell=True)
 
-    #print(pred_y)
-
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-
-        state_dicts = {'model':model.state_dict(),
-                       'opt':optimizer.state_dict()}
-
-        torch.save(state_dicts, 'best-epoch.pt')
-
-    #if early_stopping(loss_dict['train'], loss_dict['val'], min_delta=10, tolerance = 20):                                                                                                               
-    #  print("We are at epoch:", epoch)                                                                                                                                                                   
-    #  break                                                                                                                                                                                              
-
-
-    if len(last_ten) > 9:
-        last_ten.pop(0)
-        last_ten.append(val_loss)
-
-        criterion = (np.max(last_ten) - np.min(last_ten))/np.max(last_ten)
-        #print(np.max(last_ten))                                                                                                                                                                          
-        #print(np.min(last_ten))                                                                                                                                                                          
-        #print(criterion)                                                                                                                                                                                 
-        if criterion < 0.00003:
-            break
-    else:
-        last_ten.append(val_loss)
-
-
-df = pd.DataFrame.from_dict(loss_dict)
-print(df)
-#df.to_csv("losses_t0p1_dim512.csv")
-
-
-
-final_y_s = pred_y[y_test==1].numpy()
-final_y_b = pred_y[y_test==0].numpy()
-final_w_s = weights_test[y_test==1].numpy()
-final_w_b = weights_test[y_test==0].numpy()
-
-
-
-#plot 
-fig,ax = plt.subplots(figsize=(7,6))
-#bins=np.linspace(0,1,25)
-plt.hist(final_y_s,weights=final_w_s,histtype='step',density=True,label='Signal')#,bins=bins)
-plt.hist(final_y_b,weights=final_w_b,histtype='step',density=True,label='Background')#,bins=bins)
-plt.legend()
-fig.savefig('/etpwww/web/mgais/public_html/svj/figs/dnn/test.png',bbox_inches='tight',dpi=300)
-fig.savefig('/etpwww/web/mgais/public_html/svj/figs/dnn/test.pdf',bbox_inches='tight')
-
+    state_dicts = {'model':network.state_dict(),
+                   'opt':optimizer.state_dict(),
+                   'lr':scheduler.state_dict()}
+    df.to_csv("%s/"%mpath+"/loss.csv")
+    torch.save(state_dicts, os.path.join(mpath, f'epoch-{epoch}.pt'))
+    
+    if loss_val < best_val_loss:
+        best_val_loss = loss_val
+        torch.save(state_dicts, os.path.join(mpath, 'best-epoch.pt'))
 
