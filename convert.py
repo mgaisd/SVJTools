@@ -16,34 +16,47 @@ def padarray(A, size):
         return np.pad(A, pad_width=(0, t), mode='constant')
 
 infile = sys.argv[1]
-datatype = sys.argv[2]
-issignal = bool(int(sys.argv[3]))
+issignal = bool(int(sys.argv[2]))
 try:
-    maxevents = int(sys.argv[4]) ### also means random shuffling
+    maxevents = int(sys.argv[3]) ### also means random shuffling
 except:
     maxevents = -1
 
-#maxevents = int(sys.argv[4])
+branches = ['FatJet1Const_pt','FatJet1Const_eta','FatJet1Const_phi','FatJet1Const_mass','FatJet1Const_charge','FatJet1Const_pdgID','FatJet2Const_pt','FatJet2Const_eta','FatJet2Const_phi','FatJet2Const_mass','FatJet2Const_charge','FatJet2Const_pdgID','evtweight']
 
-gen_branches = ['GenJetConst_pt','GenJetConst_eta','GenJetConst_phi','GenJetConst_mass']
-scouting_branches = ['FatJetConst_pt','FatJetConst_eta','FatJetConst_phi','FatJetConst_mass']
-offline_branches = ['RecoJetConst_pt','RecoJetConst_eta','RecoJetConst_phi','RecoJetConst_mass']
+ifile = uproot.open(infile)['events']
+n_fatjet = ifile['n_fatjet'].array() > 1
+ht = ifile['ht'].array()[n_fatjet] > 500
+MT = ifile['MT'].array()[n_fatjet] > 720
+DeltaEta = abs(ifile['FatJet_eta'].array()[n_fatjet][:,0] - ifile['FatJet_eta'].array()[n_fatjet][:,1]) < 1.5
+RT = ifile['MET'].array()[n_fatjet] / ifile['MT'].array()[n_fatjet] > 0.15
+DeltaPhimin = np.minimum(abs(ifile['FatJet_phi'].array()[n_fatjet][:,0] - ifile['MET_phi'].array()[n_fatjet][:]), abs(ifile['FatJet_phi'].array()[n_fatjet][:,1] - ifile['MET_phi'].array()[n_fatjet][:])) < 0.8
+nconst1 = ifile['FatJet_nconst'].array()[n_fatjet][:,0] >= 5
+nconst2 = ifile['FatJet_nconst'].array()[n_fatjet][:,1] >= 5
+sel_mask =  ht & MT & DeltaEta & RT & DeltaPhimin & nconst1 & nconst2
+events = ifile.arrays()[n_fatjet][sel_mask]
 
-ifile = uproot.open(infile)
-events = ifile['Events']
-#events.show()
-
-if datatype == 'gen':
-    branches = gen_branches
-elif datatype == 'scouting':
-    branches = scouting_branches
-elif datatype == 'offline':
-    branches = offline_branches
     
 data = {}
 for b in branches:
-    print(events[b].array())
-    data[b] = events[b].array()
+    print(events[b])
+    data[b] = events[b]
+data['evtweight'] = np.reshape(data['evtweight'], (len(data['evtweight']),-1)) #to get same shape as other inputs (2D array) 
+
+#run on background first to get sum of weights
+if(issignal == 0):
+    print("# of events after cuts: ", np.shape(data.get("evtweight")))
+    print("sum of weights: ", np.sum(data["evtweight"]))
+    
+#change signal weights to balance signal and background (identical sum of weights for both after cuts)
+if(issignal == 1):
+    print("# of events after cuts: ", np.shape(data.get("evtweight")))
+    print("old weights: ", data.get("evtweight"))
+    print("old sum of weights: ", np.sum(data.get("evtweight")))
+    #data["evtweight"] = data["evtweight"] * 183073.0/np.sum(data["evtweight"]) #enter sum of signal weights after cuts here
+    data["evtweight"] = data["evtweight"] * 45.6636945/np.sum(data["evtweight"]) #enter sum of background weights after cuts here
+    print("new weights: ", data.get("evtweight"))
+    print("new sum of weights: ", np.sum(data.get("evtweight")))
     
 concat_data = []
 if maxevents == -1:
@@ -53,7 +66,7 @@ else:
     #which_indices = list(random.sample([i for i in range(len(data[branches[0]]))],maxevents))
     which_indices = [i for i in range(len(data[branches[0]]))]
     random.shuffle(which_indices)
-    print(which_indices)
+    #print(which_indices)
     
 for i in tqdm.tqdm(range(len(which_indices))):
     #print("New event",i)
@@ -75,8 +88,6 @@ for i in tqdm.tqdm(range(len(which_indices))):
 
 concat_data = np.array(concat_data)
 target = np.array([1 if issignal else 0 for e in range(len(concat_data))])
-    #print
-    #arrs = [np.stack(events[b].array(), axis=0) for b in gen_branches]
 
 print(concat_data.shape)
 print(target.shape)
@@ -89,7 +100,7 @@ print(split1, split2)
 
 
 for t in ['train','val','test']:
-    hf = h5py.File(infile.replace(".root","_%s.h5"%t), 'w')
+    hf = h5py.File(infile.replace(".root","_%s_all_features.h5"%t), 'w')
     if t=='train':
         hf.create_dataset('features', data=concat_data[:split1,:,:])
         hf.create_dataset('target', data=target[:split1])

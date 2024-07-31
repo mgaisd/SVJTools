@@ -58,13 +58,41 @@ class SVJV1(Dataset):
         self.max_events = max_events
         self.strides = [0]
         self.calculate_offsets()
-
+        self.fill_data() #new
+        
     def calculate_offsets(self):
         for path in self.raw_paths:
             with h5py.File(path, 'r') as f:
                 self.strides.append(len(f['features'][()]))
 
         self.strides = np.cumsum(self.strides)
+    #new
+    def fill_data(self):
+        for fi,path in enumerate(self.raw_paths):
+            with h5py.File(path, 'r') as f:
+                 tmp_features = f['features'][()]
+                 tmp_truth_label = f['target'][()]
+                 if fi == 0:
+                     self.data_features = tmp_features
+                     self.data_truth_label = tmp_truth_label
+                 else:
+                     self.data_features = np.concatenate((self.data_features,tmp_features))
+                     self.data_truth_label = np.concatenate((self.data_truth_label,tmp_truth_label))
+        #print("AAAAAAAAAA",self.data_features)
+        print(self.data_features.shape)
+        tmp_weights = self.data_features[:,0,12]
+        self.data_weights = tmp_weights
+        self.data_weights = np.concatenate((self.data_weights,tmp_weights))
+        #print("BBBBBBBBBB",self.data_weights)
+        print(self.data_weights.shape)
+        tmp_j1 = self.data_features[:,:,:6]
+        tmp_j2 = self.data_features[:,:,6:12]
+        self.data_features = np.concatenate((tmp_j1,tmp_j2))
+        #print("CCCCCCCCCC",self.data_features)
+        print(self.data_features.shape)
+        tmp_truth = self.data_truth_label
+        self.data_truth_label = np.concatenate((self.data_truth_label,tmp_truth))
+        print(self.data_truth_label.shape)
         
     def download(self):
         raise RuntimeError(
@@ -72,7 +100,7 @@ class SVJV1(Dataset):
             '*.z files to {}'.format(self.url, self.raw_dir))
 
     def len(self):
-        return self.strides[-1]
+        return 2*self.strides[-1]
 
     @property
     def raw_file_names(self):
@@ -85,19 +113,29 @@ class SVJV1(Dataset):
 
 
     def get(self, idx):
-        file_idx = np.searchsorted(self.strides, idx) - 1
+        #file_idx = np.searchsorted(self.strides, idx) - 1
         #print(file_idx)
-        idx_in_file = idx - self.strides[max(0, file_idx)] - 1
-        if file_idx >= self.strides.size:
-            raise Exception(f'{idx} is beyond the end of the event list {self.strides[-1]}')
+        #idx_in_file = idx - self.strides[max(0, file_idx)] - 1
+        #if file_idx >= self.strides.size:
+        #    raise Exception(f'{idx} is beyond the end of the event list {self.strides[-1]}')
         edge_index = torch.empty((2,0), dtype=torch.long)
-        with h5py.File(self.raw_paths[file_idx]) as f:
-            Npfc = (f['features'][idx_in_file][:,0] != 0).sum()
-            feats = f['features'][idx_in_file,:Npfc,:]
-            x_pfc = torch.from_numpy(feats).float()
-            x = torch.from_numpy(feats).float()
-            y = np.array(f['target'][idx_in_file],dtype='f')
-            y = torch.from_numpy(y)
+        #with h5py.File(self.raw_paths[file_idx]) as f:
+        Npfc = (self.data_features[idx][:,0] != 0).sum()
+        feats = self.data_features[idx,:Npfc,:]
+        weights = np.array(self.data_weights[idx],dtype='f')
+
+        #convert to dataframe to remove weights, then reconvert to numpy array
+        #feats_df = pd.DataFrame(feats, columns = ['j1pt', 'j1eta', 'j1phi', 'j1mass', 'j2pt', 'j2eta', 'j2phi', 'j2mass', 'weights'])
+        #weights = feats_df['weights'].to_numpy()
+        #feats_df = feats_df.drop(columns = ['weights'])
+        #feats = feats_df.to_numpy()
+        
+        #convert to torch tensors
+        x_pfc = torch.from_numpy(feats).float()
+        x = torch.from_numpy(feats).float()
+        y = np.array(self.data_truth_label[idx],dtype='f')
+        y = torch.from_numpy(y)
+        weights = torch.tensor(weights)
         
         self.processed_events += 1
         #if self.processed_events >= self.max_events:
@@ -108,17 +146,17 @@ class SVJV1(Dataset):
         #print(x_pfc)
         #print(y)
         
-        return Data(x=x, edge_index=edge_index, y=y, x_pf=x_pfc)
+        return Data(x=x, edge_index=edge_index, y=y, x_pf=x_pfc, weights=weights)
 
         
 class SVJNet(nn.Module):
     def __init__(self):
         super(SVJNet, self).__init__()
         
-        hidden_dim = 64
+        hidden_dim = 20
         
         self.pf_encode = nn.Sequential(
-            nn.Linear(4, hidden_dim),
+            nn.Linear(6, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ELU()
@@ -134,21 +172,23 @@ class SVJNet(nn.Module):
             k=24
         )
 
-        self.conv3 = DynamicEdgeConv(
-            nn=nn.Sequential(nn.Linear(2*hidden_dim, hidden_dim), nn.ELU()),
-            k=24
-        )
+        #self.conv3 = DynamicEdgeConv(
+        #    nn=nn.Sequential(nn.Linear(2*hidden_dim, hidden_dim), nn.ELU()),
+        #    k=24
+        #)
 
         self.output = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+            nn.Linear(hidden_dim, 20),
             nn.ELU(),
-            nn.Linear(64, 32),
+            nn.Linear(20, 12),
+            nn.Dropout(p=0.1),
             nn.ELU(),
-            nn.Linear(32, 32),
+            #nn.Linear(12, 12),
+            #nn.ELU(),
+            nn.Linear(12, 6),
+            nn.Dropout(p=0.1),
             nn.ELU(),
-            nn.Linear(32, 8),
-            nn.ELU(),
-            nn.Linear(8, 1)
+            nn.Linear(6, 1)
             #nn.ELU()
         )
         
@@ -162,13 +202,13 @@ class SVJNet(nn.Module):
         
         feats1 = self.conv1(x=(x_pf_enc, x_pf_enc), batch=(batch_pf, batch_pf))
         feats2 = self.conv2(x=(feats1, feats1), batch=(batch_pf, batch_pf))
-        feats3 = self.conv3(x=(feats2, feats2), batch=(batch_pf, batch_pf))
+        #feats3 = self.conv3(x=(feats2, feats2), batch=(batch_pf, batch_pf))
 
         #out, batch = avg_pool_x(batch_pf, feats3, batch_pf)
         #out = self.output(out)
 
         batch = batch_pf
-        out  = global_add_pool(feats3, batch_pf)
+        out  = global_add_pool(feats2, batch_pf)
         out = self.output(out)
         
         return out, batch
@@ -193,7 +233,7 @@ train_loader = DataLoader(data_train, batch_size=batchsize,shuffle=True,
 val_loader = DataLoader(data_val, batch_size=batchsize,shuffle=True,
                          follow_batch=['x_pf'])
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
 #device = 'cpu'
 print(device)
 
@@ -219,9 +259,13 @@ def train():
         #print(np.bincount(data.x_pf_batch.cpu().detach().numpy()))
         #print(data.x_pf[0])
         #print(data.x_pf[1])
-        loss = nn.BCEWithLogitsLoss(reduction='sum')(out[0].view(-1),data.y.float())
+        weights = data.weights.float()
+        loss = nn.BCEWithLogitsLoss(weight=weights, reduction='sum')(out[0].view(-1),data.y.float())
         #print(torch.sigmoid(out[0].view(-1)))
         #print(data.y.float())
+        #print("weights: ", weights)
+        #print("loss: ", loss)
+        #weighted_loss = loss * weights
         loss.backward()
         total_loss += loss.item()
         optimizer.step()
@@ -242,8 +286,8 @@ def validate():
         with torch.no_grad():
             out = network(data.x_pf,
                        data.x_pf_batch)
- 
-            loss = nn.BCEWithLogitsLoss(reduction='sum')(out[0].view(-1),data.y.float())
+            weights = data.weights.float()
+            loss = nn.BCEWithLogitsLoss(weight=weights, reduction='sum')(out[0].view(-1),data.y.float())
 
             total_loss += loss.item()
             if  counter*batchsize > max_events_train:
@@ -255,7 +299,7 @@ all_train_loss = []
 all_val_loss = []
 loss_dict = {'train_loss': [], 'val_loss': []}
 
-for epoch in range(1, 65):
+for epoch in range(1, 71):
     print(f'Training Epoch {epoch} on {len(train_loader.dataset)} jets')
     loss = train()
     scheduler.step()
